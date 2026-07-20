@@ -4,6 +4,7 @@ import AppKit
 @MainActor
 final class ChatGPTBridge {
     private let report: (String) -> Void
+    private var sendTask: Task<Void, Never>?
 
     init(report: @escaping (String) -> Void) {
         self.report = report
@@ -31,18 +32,31 @@ final class ChatGPTBridge {
         let elements = Accessibility.descendants(of: Accessibility.activeWindow(of: application))
         AppLog.write("CHATGPT AX \(Accessibility.diagnosticSummary(in: elements))")
 
-        Task { [weak self] in
+        sendTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let result = try await DevToolsClient.send(imageAt: imageURL)
+                try Task.checkCancellation()
                 AppLog.write("SEND DevTools completed; method=\(result.method)")
                 AppLog.write("RESPONSE finished characters=\(result.response.count)")
                 self.report(result.response)
             } catch {
-                AppLog.write("SEND DevTools failed: \(error.localizedDescription)")
-                self.report("Ошибка отправки: \(error.localizedDescription)")
+                if Task.isCancelled {
+                    AppLog.write("SEND cancelled by close hotkey")
+                } else {
+                    AppLog.write("SEND DevTools failed: \(error.localizedDescription)")
+                    self.report("Ошибка отправки: \(error.localizedDescription)")
+                }
             }
+            self.sendTask = nil
             completion()
         }
+    }
+
+    func cancel() {
+        guard let sendTask else { return }
+        AppLog.write("SEND cancellation requested")
+        sendTask.cancel()
+        self.sendTask = nil
     }
 }

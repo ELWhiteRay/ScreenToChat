@@ -7,33 +7,6 @@ final class DevToolsClient {
         let response: String
     }
 
-    enum ClientError: LocalizedError {
-        case unavailable, noPage, attachmentFailed, noSendButton, noResponse
-        case protocolError(String)
-
-        var errorDescription: String? {
-            switch self {
-            case .unavailable: "локальный DevTools-порт недоступен"
-            case .noPage: "в DevTools не найден открытый чат"
-            case .attachmentFailed: "чат не принял screenshot через drag-and-drop"
-            case .noSendButton: "стрелка отправки не появилась"
-            case .noResponse: "ответ ChatGPT не появился"
-            case .protocolError(let message): "ошибка DevTools: \(message)"
-            }
-        }
-    }
-
-    private struct Target: Decodable {
-        let type: String
-        let title: String
-        let webSocketDebuggerUrl: URL?
-    }
-
-    private struct ResponseState: Decodable {
-        let text: String
-        let ready: Bool
-    }
-
     private let socket: URLSessionWebSocketTask
     private var nextID = 0
 
@@ -57,19 +30,41 @@ final class DevToolsClient {
         return SendResult(method: method, response: response)
     }
 
+    static func prepareChat() async throws {
+        let client = try await connect()
+        AppLog.write("PROMPT opening prepared chat")
+        guard let opened: String = try await client.value(of: ChatGPTDOM.openPreparedChat),
+              opened.hasPrefix("opened:") else {
+            throw DevToolsError.preparedChatMissing
+        }
+        AppLog.write("PROMPT prepared chat selected; \(opened)")
+    }
+
+    static func isAvailable() async -> Bool {
+        (try? await connect()) != nil
+    }
+
+    static func waitUntilAvailable() async throws {
+        for _ in 0..<8 {
+            if await isAvailable() { return }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        throw DevToolsError.unavailable
+    }
+
     private static func connect() async throws -> DevToolsClient {
         let endpoint = URL(string: "http://127.0.0.1:9222/json/list")!
         var request = URLRequest(url: endpoint)
         request.timeoutInterval = 2
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200 else {
-            throw ClientError.unavailable
+            throw DevToolsError.unavailable
         }
-        let targets = try JSONDecoder().decode([Target].self, from: data)
+        let targets = try JSONDecoder().decode([DevToolsTarget].self, from: data)
         guard let socketURL = targets.first(where: {
-            $0.type == "page" && !$0.title.isEmpty && $0.webSocketDebuggerUrl != nil
+            $0.type == "page" && $0.url == "app://-/index.html" && $0.webSocketDebuggerUrl != nil
         })?.webSocketDebuggerUrl else {
-            throw ClientError.noPage
+            throw DevToolsError.noPage
         }
         return DevToolsClient(socketURL: socketURL)
     }
@@ -82,29 +77,9 @@ final class DevToolsClient {
     private func attachImage(at imageURL: URL) async throws -> String {
         let filename = "screen-to-chat-\(UUID().uuidString).png"
         let base64 = try Data(contentsOf: imageURL).base64EncodedString()
-        let expression = """
-        (async () => {
-          const target = document.querySelector('[data-codex-composer=true]');
-          if (!target) return 'missing-composer';
-          const binary = atob('\(base64)');
-          const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
-          const file = new File([bytes], '\(filename)', {type: 'image/png'});
-          const transfer = new DataTransfer();
-          transfer.items.add(file);
-          for (const type of ['dragenter', 'dragover', 'drop']) {
-            target.dispatchEvent(new DragEvent(type, {
-              bubbles: true, cancelable: true, dataTransfer: transfer
-            }));
-          }
-          for (let attempt = 0; attempt < 20; attempt++) {
-            if (document.querySelector('button[aria-label="Remove \(filename)"]')) return 'attached';
-            await new Promise(resolve => setTimeout(resolve, 250));
-          }
-          return 'missing-attachment';
-        })()
-        """
+        let expression = ChatGPTDOM.attachImage(filename: filename, base64: base64)
         guard try await value(of: expression) == "attached" else {
-            throw ClientError.attachmentFailed
+            throw DevToolsError.attachmentFailed
         }
         return filename
     }
@@ -117,7 +92,7 @@ final class DevToolsClient {
             }
             try await Task.sleep(nanoseconds: 250_000_000)
         }
-        throw ClientError.noSendButton
+        throw DevToolsError.noSendButton
     }
 
     private func waitForResponse(after previousTurn: String) async throws -> String {
@@ -126,14 +101,14 @@ final class DevToolsClient {
         for _ in 0..<180 {
             if let json: String = try await value(of: expression),
                let data = json.data(using: .utf8),
-               let state = try? JSONDecoder().decode(ResponseState.self, from: data) {
+               let state = try? JSONDecoder().decode(DevToolsResponseState.self, from: data) {
                 latest = state.text
                 if state.ready, !latest.isEmpty { return latest }
             }
             try await Task.sleep(nanoseconds: 500_000_000)
         }
         if !latest.isEmpty { return latest }
-        throw ClientError.noResponse
+        throw DevToolsError.noResponse
     }
 
     private func value<T>(of expression: String) async throws -> T? {
@@ -159,9 +134,12 @@ final class DevToolsClient {
             @unknown default: continue
             }
             guard let response = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-                  response["id"] as? Int == id else { continue }
+                  response["id"] as? Int == id else {
+                await Task.yield()
+                continue
+            }
             if let error = response["error"] as? [String: Any] {
-                throw ClientError.protocolError(error["message"] as? String ?? "unknown")
+                throw DevToolsError.protocolError(error["message"] as? String ?? "unknown")
             }
             return response["result"] as? [String: Any] ?? [:]
         }
@@ -210,4 +188,5 @@ final class DevToolsClient {
         })()
         """
     }
+
 }

@@ -5,18 +5,31 @@ import ApplicationServices
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let overlay = Overlay()
+    private let chatGPT = ChatGPTController()
+    private let hotKeys = HotKeyMonitor()
+    private lazy var statusMenu = StatusMenu(
+        launch: { [weak self] in self?.launchChatGPT() },
+        capture: { [weak self] in self?.captureAndSend() },
+        closeChatGPT: { [weak self] in self?.closeChatGPT() },
+        openLog: {
+            AppLog.write("LOG opened from status menu")
+            NSWorkspace.shared.open(AppLog.url)
+        },
+        quit: { NSApp.terminate(nil) }
+    )
     private lazy var bridge = ChatGPTBridge { [weak self] message in
         self?.overlay.show(message, hideAfter: 3)
     }
-    private var keyMonitor: Any?
     private var permissionTimer: Timer?
     private var lastMissingPermissions: [String]?
-    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-    private let statusLine = NSMenuItem(title: "Запуск…", action: nil, keyEquivalent: "")
     private var busy = false
+    private var operationID = 0
+    private var launchTask: Task<Void, Never>?
+    private var closeTask: Task<Void, Never>?
+    private static let readyStatus = "Активно — ⇧⌘7 / ⇧⌘9 / ⇧⌘1 / ⇧⌘0"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        setupStatusItem()
+        statusMenu.update("Запуск…")
         AppLog.write("START pid=\(ProcessInfo.processInfo.processIdentifier)")
         requestPermissions()
         refreshPermissions()
@@ -25,7 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         AppLog.write("STOP")
         permissionTimer?.invalidate()
-        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        hotKeys.unregister()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
@@ -38,19 +51,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             overlay.show("Предыдущая отправка ещё выполняется", hideAfter: 3)
             return
         }
+        operationID += 1
+        let currentOperation = operationID
         busy = true
         updateStatus("Снимок и отправка…")
         AppLog.write("CAPTURE requested")
         overlay.hide()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-            guard let self else { return }
+            guard let self, currentOperation == operationID else { return }
             do {
-                let imageURL = try captureMainScreen()
+                let imageURL = try ScreenCapture.mainScreen()
                 AppLog.write("CAPTURE completed; starting ChatGPT automation")
                 bridge.send(imageAt: imageURL) { [weak self] in
-                    self?.busy = false
-                    self?.updateStatus("Активно — ⇧⌘9")
+                    guard let self, currentOperation == self.operationID else { return }
+                    self.busy = false
+                    self.updateStatus(Self.readyStatus)
                     AppLog.write("SEND flow completed")
                 }
             } catch {
@@ -58,6 +74,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 updateStatus("Ошибка снимка")
                 AppLog.write("CAPTURE failed: \(error.localizedDescription)")
                 overlay.show("Не удалось сделать снимок: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func launchChatGPT() {
+        guard !busy else {
+            overlay.show("Предыдущая операция ещё выполняется", hideAfter: 3)
+            return
+        }
+        operationID += 1
+        let currentOperation = operationID
+        busy = true
+        updateStatus("Запуск ChatGPT…")
+        overlay.show("...")
+        AppLog.write("HOTKEY launch flow started")
+
+        launchTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if currentOperation == operationID {
+                    busy = false
+                    updateStatus(Self.readyStatus)
+                }
+            }
+            do {
+                try await chatGPT.launchAndPrepare()
+                try Task.checkCancellation()
+                overlay.show("ChatGPT готов — нажмите ⇧⌘9", hideAfter: 3)
+            } catch {
+                guard !Task.isCancelled else { return }
+                AppLog.write("CHATGPT launch failed: \(error.localizedDescription)")
+                overlay.show("Ошибка запуска ChatGPT: \(error.localizedDescription)", hideAfter: 6)
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            guard let self, currentOperation == operationID, busy else { return }
+            operationID += 1
+            launchTask?.cancel()
+            launchTask = nil
+            busy = false
+            updateStatus(Self.readyStatus)
+            AppLog.write("CHATGPT launch timed out after 15 seconds")
+            overlay.show("ChatGPT не успел запуститься за 15 секунд", hideAfter: 5)
+        }
+    }
+
+    private func closeChatGPT() {
+        operationID += 1
+        let currentOperation = operationID
+        launchTask?.cancel()
+        launchTask = nil
+        bridge.cancel()
+        closeTask?.cancel()
+        busy = true
+        updateStatus("Закрытие ChatGPT…")
+        AppLog.write("HOTKEY close ChatGPT flow started")
+
+        closeTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if currentOperation == operationID {
+                    busy = false
+                    updateStatus(Self.readyStatus)
+                }
+            }
+            do {
+                let closed = try await chatGPT.terminate()
+                try Task.checkCancellation()
+                overlay.show(closed ? "ChatGPT закрыт" : "ChatGPT уже закрыт", hideAfter: 3)
+            } catch {
+                guard !Task.isCancelled else { return }
+                AppLog.write("CHATGPT close failed: \(error.localizedDescription)")
+                overlay.show("Ошибка закрытия ChatGPT: \(error.localizedDescription)", hideAfter: 6)
             }
         }
     }
@@ -73,11 +163,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let accessibilityGranted = AXIsProcessTrusted()
         let screenCaptureGranted = CGPreflightScreenCaptureAccess()
 
-        if accessibilityGranted, keyMonitor == nil { registerHotKeys() }
-        if !accessibilityGranted, let keyMonitor {
-            NSEvent.removeMonitor(keyMonitor)
-            self.keyMonitor = nil
+        if accessibilityGranted, !hotKeys.isRegistered {
+            hotKeys.register { [weak self] in self?.handleShortcut($0) }
         }
+        if !accessibilityGranted { hotKeys.unregister() }
 
         var missing: [String] = []
         if !accessibilityGranted { missing.append("«Универсальный доступ»") }
@@ -85,11 +174,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if missing != lastMissingPermissions {
             lastMissingPermissions = missing
-            let status = missing.isEmpty ? "Активно — ⇧⌘9" : "Нет доступа: \(missing.joined(separator: ", "))"
+            let status = missing.isEmpty ? Self.readyStatus : "Нет доступа: \(missing.joined(separator: ", "))"
             updateStatus(status)
             AppLog.write("PERMISSIONS accessibility=\(accessibilityGranted) screenCapture=\(screenCaptureGranted)")
             overlay.show(missing.isEmpty
-                         ? "Готово — нажмите ⇧⌘9"
+                         ? "Готово — ⇧⌘7 запускает ChatGPT, ⇧⌘9 делает снимок"
                          : "Разрешите \(missing.joined(separator: " и ")) в Системных настройках",
                          hideAfter: missing.isEmpty ? 3 : 8)
         }
@@ -99,92 +188,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             permissionTimer = nil
         } else if permissionTimer == nil {
             permissionTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refreshPermissions() }
+                Task { @MainActor [weak self] in self?.refreshPermissions() }
             }
         }
     }
 
-    private func registerHotKeys() {
-        keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated { self?.handleShortcut(event) }
-        }
-        AppLog.write("HOTKEY monitor registered=\(keyMonitor != nil)")
-    }
-
-    private func handleShortcut(_ event: NSEvent) {
-        switch Self.hotKey(from: event.keyCode,
-                           modifiers: event.modifierFlags,
-                           isRepeat: event.isARepeat) {
-        case 25:
+    private func handleShortcut(_ shortcut: HotKeyMonitor.Shortcut) {
+        switch shortcut {
+        case .launchChatGPT:
+            AppLog.write("HOTKEY ⇧⌘7")
+            launchChatGPT()
+        case .capture:
             AppLog.write("HOTKEY ⇧⌘9")
-            captureAndSend() // Physical 9 key.
-        case 29:
+            captureAndSend()
+        case .closeChatGPT:
+            AppLog.write("HOTKEY ⇧⌘1")
+            closeChatGPT()
+        case .quit:
             AppLog.write("HOTKEY ⇧⌘0")
-            NSApp.terminate(nil) // Physical 0 key.
-        default: break
+            NSApp.terminate(nil)
         }
-    }
-
-    private func setupStatusItem() {
-        statusItem.button?.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "ScreenToChat1")
-        statusItem.button?.toolTip = "ScreenToChat1"
-
-        let menu = NSMenu()
-        menu.addItem(statusLine)
-        menu.addItem(.separator())
-        let capture = NSMenuItem(title: "Сделать снимок и отправить", action: #selector(captureFromMenu), keyEquivalent: "")
-        capture.target = self
-        menu.addItem(capture)
-        let openLog = NSMenuItem(title: "Открыть лог", action: #selector(openLog), keyEquivalent: "l")
-        openLog.target = self
-        menu.addItem(openLog)
-        let quit = NSMenuItem(title: "Завершить ScreenToChat1", action: #selector(quit), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
-        statusItem.menu = menu
     }
 
     private func updateStatus(_ status: String) {
-        statusLine.title = status
-        statusItem.button?.toolTip = "ScreenToChat1 — \(status)"
+        statusMenu.update(status)
     }
 
-    @objc private func openLog() {
-        AppLog.write("LOG opened from status menu")
-        NSWorkspace.shared.open(AppLog.url)
-    }
-
-    @objc private func captureFromMenu() {
-        AppLog.write("MENU capture")
-        captureAndSend()
-    }
-
-    @objc private func quit() {
-        NSApp.terminate(nil)
-    }
-
-    nonisolated private static func hotKey(
-        from keyCode: UInt16,
-        modifiers: NSEvent.ModifierFlags,
-        isRepeat: Bool
-    ) -> UInt16? {
-        let shortcutModifiers = modifiers.intersection([.command, .shift, .control, .option])
-        guard shortcutModifiers == [.command, .shift],
-              !isRepeat, keyCode == 25 || keyCode == 29 else { return nil }
-        return keyCode
-    }
-}
-
-private func captureMainScreen() throws -> URL {
-    let url = FileManager.default.temporaryDirectory.appendingPathComponent("screen-to-chat.png")
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-    process.arguments = ["-x", "-m", "-t", "png", url.path]
-    try process.run()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0, NSImage(contentsOf: url) != nil else {
-        throw NSError(domain: "ScreenToChat", code: 1,
-                      userInfo: [NSLocalizedDescriptionKey: "проверьте разрешение «Запись экрана»"])
-    }
-    return url
 }
