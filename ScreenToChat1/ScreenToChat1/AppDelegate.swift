@@ -63,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 let imageURL = try ScreenCapture.mainScreen()
                 AppLog.write("CAPTURE completed; starting ChatGPT automation")
+                overlay.show(":")
                 bridge.send(imageAt: imageURL) { [weak self] in
                     guard let self, currentOperation == self.operationID else { return }
                     self.busy = false
@@ -101,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 try await chatGPT.launchAndPrepare()
                 try Task.checkCancellation()
-                overlay.show("ChatGPT готов — нажмите ⇧⌘9", hideAfter: 3)
+                overlay.hide()
             } catch {
                 guard !Task.isCancelled else { return }
                 AppLog.write("CHATGPT launch failed: \(error.localizedDescription)")
@@ -141,9 +142,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             do {
-                let closed = try await chatGPT.terminate()
+                _ = try await chatGPT.terminate()
                 try Task.checkCancellation()
-                overlay.show(closed ? "ChatGPT закрыт" : "ChatGPT уже закрыт", hideAfter: 3)
+                overlay.show(".", hideAfter: 3)
             } catch {
                 guard !Task.isCancelled else { return }
                 AppLog.write("CHATGPT close failed: \(error.localizedDescription)")

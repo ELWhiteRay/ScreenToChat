@@ -39,19 +39,21 @@ final class Overlay {
         let presentationID = UUID()
         self.presentationID = presentationID
         text.string = message
-        if let screen = NSScreen.main {
+        if let screen = NSScreen.screens.first {
             let inset: CGFloat = 3
-            let width = min(760, screen.frame.width - inset * 2)
+            let screenFrame = screen.frame.insetBy(dx: inset, dy: inset)
+            let width = max(1, min(760, screenFrame.width))
             let bounds = (message as NSString).boundingRect(
                 with: NSSize(width: width, height: .greatestFiniteMagnitude),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 attributes: [.font: text.font!]
             )
-            let height = min(ceil(bounds.height), screen.frame.height * 0.4)
-            panel.setFrame(NSRect(x: screen.frame.minX + inset,
-                                  y: screen.frame.minY + inset,
+            let maximumHeight = max(1, min(screenFrame.height * 0.4, screenFrame.height))
+            let height = max(1, min(ceil(bounds.height), maximumHeight))
+            panel.setFrame(NSRect(x: screenFrame.minX,
+                                  y: screenFrame.minY,
                                   width: width,
-                                  height: max(1, height)),
+                                  height: height),
                            display: true)
             let lines = message.split(separator: "\n", omittingEmptySubsequences: false).count
             AppLog.write("OVERLAY show characters=\(message.count) lines=\(lines) frame=\(panel.frame)")
