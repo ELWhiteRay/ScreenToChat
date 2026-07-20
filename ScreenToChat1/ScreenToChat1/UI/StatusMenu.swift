@@ -33,7 +33,7 @@ final class StatusMenu: NSObject {
 
     private func setup() {
         statusItem.button?.image = NSImage(
-            systemSymbolName: "camera.viewfinder",
+            systemSymbolName: "terminal",
             accessibilityDescription: "ScreenToChat1"
         )
         statusItem.button?.toolTip = "ScreenToChat1"
@@ -41,9 +41,9 @@ final class StatusMenu: NSObject {
         let menu = NSMenu()
         menu.addItem(statusLine)
         menu.addItem(.separator())
-        menu.addItem(item("Запустить ChatGPT и подготовить чат — ⇧⌘7", #selector(launchAction)))
-        menu.addItem(item("Сделать снимок и отправить — ⇧⌘9", #selector(captureAction)))
-        menu.addItem(item("Закрыть ChatGPT — ⇧⌘1", #selector(closeChatGPTAction)))
+        menu.addItem(item("Запуск и подготовка", #selector(launchAction)))
+        menu.addItem(item("Сделать снимок и отправить", #selector(captureAction)))
+        menu.addItem(item("Закрыть чат", #selector(closeChatGPTAction)))
         menu.addItem(.separator())
         menu.addItem(item("Открыть лог", #selector(openLogAction), key: "l"))
         menu.addItem(item("Завершить ScreenToChat1", #selector(quitAction), key: "q"))
