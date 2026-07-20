@@ -4,7 +4,8 @@ import ApplicationServices
 enum Accessibility {
     static func chatGPTApplication() -> NSRunningApplication? {
         let workspace = NSWorkspace.shared.runningApplications
-        return workspace.first { $0.bundleIdentifier == "com.openai.chat" }
+        return workspace.first { $0.bundleIdentifier == "com.openai.codex" }
+            ?? workspace.first { $0.bundleIdentifier == "com.openai.chat" }
             ?? workspace.first { $0.localizedName?.localizedCaseInsensitiveContains("ChatGPT") == true }
     }
 
@@ -29,29 +30,31 @@ enum Accessibility {
             ?? application
     }
 
-    static func messageInput(in elements: [AXUIElement]) -> AXUIElement? {
-        let editable = elements.filter {
-            let role = stringAttribute(kAXRoleAttribute, of: $0)
-            return role == kAXTextAreaRole || role == kAXTextFieldRole
-        }
-        return editable
-            .filter { boolAttribute(kAXEnabledAttribute, of: $0) != false }
-            .max { inputScore($0) < inputScore($1) }
+    static func enableChromiumAccessibility(
+        for application: AXUIElement
+    ) -> (manual: AXError, enhanced: AXError) {
+        let manual = AXUIElementSetAttributeValue(
+            application, "AXManualAccessibility" as CFString, kCFBooleanTrue
+        )
+        let enhanced = AXUIElementSetAttributeValue(
+            activeWindow(of: application), "AXEnhancedUserInterface" as CFString, kCFBooleanTrue
+        )
+        return (manual, enhanced)
     }
 
-    static func pressSendButton(in elements: [AXUIElement]) -> Bool {
-        for element in elements where stringAttribute(kAXRoleAttribute, of: element) == kAXButtonRole {
-            let label = [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute]
-                .compactMap { stringAttribute($0, of: element) }
-                .joined(separator: " ")
-                .lowercased()
-            let isSend = label.contains("send") || label.contains("отправ") || label.contains("senden")
-            if isSend, boolAttribute(kAXEnabledAttribute, of: element) != false,
-               AXUIElementPerformAction(element, kAXPressAction as CFString) == .success {
-                return true
-            }
+    static func diagnosticSummary(in elements: [AXUIElement]) -> String {
+        let roles = elements.reduce(into: [String: Int]()) {
+            $0[stringAttribute(kAXRoleAttribute, of: $1) ?? "unknown", default: 0] += 1
         }
-        return false
+        let roleSummary = roles.sorted { $0.value > $1.value }.prefix(12)
+            .map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
+        let editableCount = elements.filter { isSettable(kAXValueAttribute, of: $0) }.count
+        let labels = elements.compactMap { element -> String? in
+            let label = inputLabel(element).joined(separator: " ")
+            guard !label.isEmpty else { return nil }
+            return "\(stringAttribute(kAXRoleAttribute, of: element) ?? "unknown"):\(label.prefix(100))"
+        }.prefix(12).joined(separator: " | ")
+        return "elements=\(elements.count); roles=[\(roleSummary)]; editableValues=\(editableCount); labels=[\(labels)]"
     }
 
     static func visibleText(in elements: [AXUIElement]) -> [String] {
@@ -79,20 +82,16 @@ enum Accessibility {
         }
     }
 
-    static func focus(_ element: AXUIElement) -> Bool {
-        AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+    private static func inputLabel(_ element: AXUIElement) -> [String] {
+        [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
+         kAXPlaceholderValueAttribute, kAXRoleDescriptionAttribute]
+            .compactMap { stringAttribute($0, of: element)?.lowercased() }
     }
 
-    private static func inputScore(_ element: AXUIElement) -> Int {
-        let label = [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute, kAXPlaceholderValueAttribute]
-            .compactMap { stringAttribute($0, of: element) }
-            .joined(separator: " ")
-            .lowercased()
-        let looksLikeMessage = label.contains("message") || label.contains("ask")
-            || label.contains("сообщ") || label.contains("спрос") || label.contains("nachricht")
-        let focused = boolAttribute(kAXFocusedAttribute, of: element) == true
-        let textArea = stringAttribute(kAXRoleAttribute, of: element) == kAXTextAreaRole
-        return (looksLikeMessage ? 10 : 0) + (focused ? 4 : 0) + (textArea ? 2 : 0)
+    private static func isSettable(_ name: String, of element: AXUIElement) -> Bool {
+        var settable = DarwinBoolean(false)
+        return AXUIElementIsAttributeSettable(element, name as CFString, &settable) == .success
+            && settable.boolValue
     }
 
     private static func attribute<T>(_ name: String, of element: AXUIElement) -> T? {
@@ -110,36 +109,4 @@ enum Accessibility {
     private static func boolAttribute(_ name: String, of element: AXUIElement) -> Bool? {
         attribute(name, of: element)
     }
-}
-
-struct PasteboardSnapshot {
-    private let items: [[NSPasteboard.PasteboardType: Data]]
-
-    init(_ pasteboard: NSPasteboard = .general) {
-        items = pasteboard.pasteboardItems?.map { item in
-            Dictionary(uniqueKeysWithValues: item.types.compactMap { type in
-                item.data(forType: type).map { (type, $0) }
-            })
-        } ?? []
-    }
-
-    func restore(to pasteboard: NSPasteboard = .general) {
-        pasteboard.clearContents()
-        let restored = items.map { values -> NSPasteboardItem in
-            let item = NSPasteboardItem()
-            for (type, data) in values { item.setData(data, forType: type) }
-            return item
-        }
-        pasteboard.writeObjects(restored)
-    }
-}
-
-func postKey(to pid: pid_t, code: CGKeyCode, flags: CGEventFlags = []) {
-    let source = CGEventSource(stateID: .hidSystemState)
-    let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true)
-    let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false)
-    down?.flags = flags
-    up?.flags = flags
-    down?.postToPid(pid)
-    up?.postToPid(pid)
 }

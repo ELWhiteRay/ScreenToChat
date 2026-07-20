@@ -4,10 +4,12 @@ import AppKit
 final class Overlay {
     private let panel: NSPanel
     private let text = NSTextView()
+    private var hideTask: DispatchWorkItem?
+    private var presentationID = UUID()
 
     init() {
         panel = NSPanel(
-            contentRect: NSRect(x: 24, y: 24, width: 760, height: 260),
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 1),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -25,32 +27,50 @@ final class Overlay {
         text.isSelectable = false
         text.drawsBackground = false
         text.textContainerInset = .zero
-        text.font = .systemFont(ofSize: 17, weight: .medium)
-        text.textColor = .white
-        text.shadow = {
-            let shadow = NSShadow()
-            shadow.shadowColor = NSColor.black.withAlphaComponent(0.9)
-            shadow.shadowBlurRadius = 4
-            shadow.shadowOffset = .zero
-            return shadow
-        }()
+        text.textContainer?.lineFragmentPadding = 0
+        text.font = .systemFont(ofSize: 8.5, weight: .medium)
+        text.textColor = NSColor(calibratedRed: 0.84, green: 0.81, blue: 0.75, alpha: 1)
+        text.shadow = nil
         panel.contentView?.addSubview(text)
     }
 
-    func show(_ message: String) {
+    func show(_ message: String, hideAfter delay: TimeInterval? = nil) {
+        hideTask?.cancel()
+        let presentationID = UUID()
+        self.presentationID = presentationID
         text.string = message
         if let screen = NSScreen.main {
-            let width = min(760, screen.visibleFrame.width - 48)
-            panel.setFrame(NSRect(x: screen.visibleFrame.minX + 24,
-                                  y: screen.visibleFrame.minY + 24,
+            let inset: CGFloat = 3
+            let width = min(760, screen.frame.width - inset * 2)
+            let bounds = (message as NSString).boundingRect(
+                with: NSSize(width: width, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: text.font!]
+            )
+            let height = min(ceil(bounds.height), screen.frame.height * 0.4)
+            panel.setFrame(NSRect(x: screen.frame.minX + inset,
+                                  y: screen.frame.minY + inset,
                                   width: width,
-                                  height: min(300, screen.visibleFrame.height * 0.4)),
+                                  height: max(1, height)),
                            display: true)
+            let lines = message.split(separator: "\n", omittingEmptySubsequences: false).count
+            AppLog.write("OVERLAY show characters=\(message.count) lines=\(lines) frame=\(panel.frame)")
         }
         panel.orderFrontRegardless()
+
+        guard let delay else { return }
+        let task = DispatchWorkItem { [weak self] in
+            guard self?.presentationID == presentationID else { return }
+            self?.hide()
+        }
+        hideTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
     }
 
     func hide() {
+        hideTask?.cancel()
+        hideTask = nil
+        presentationID = UUID()
         panel.orderOut(nil)
     }
 }

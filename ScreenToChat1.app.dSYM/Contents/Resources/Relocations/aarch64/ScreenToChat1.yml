@@ -1,0 +1,5 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/egle/Developer/read_to_chat/ScreenToChat1.app/Contents/MacOS/ScreenToChat1'
+relocations:     []
+...
