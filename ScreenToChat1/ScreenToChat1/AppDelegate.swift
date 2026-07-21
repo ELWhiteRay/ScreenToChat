@@ -110,15 +110,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25) { [weak self] in
             guard let self, currentOperation == operationID, busy else { return }
             operationID += 1
             launchTask?.cancel()
             launchTask = nil
             busy = false
             updateStatus(Self.readyStatus)
-            AppLog.write("CHATGPT launch timed out after 15 seconds")
-            overlay.show("ChatGPT не успел запуститься за 15 секунд", hideAfter: 5)
+            AppLog.write("CHATGPT launch timed out after 25 seconds")
+            overlay.show("ChatGPT не успел запуститься за 25 секунд", hideAfter: 5)
         }
     }
 

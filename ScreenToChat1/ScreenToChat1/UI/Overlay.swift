@@ -38,12 +38,17 @@ final class Overlay {
         hideTask?.cancel()
         let presentationID = UUID()
         self.presentationID = presentationID
-        text.string = message
+        let displayedMessage = message
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        text.string = displayedMessage
         if let screen = NSScreen.screens.first {
             let inset: CGFloat = 3
             let screenFrame = screen.frame.insetBy(dx: inset, dy: inset)
             let width = max(1, min(760, screenFrame.width))
-            let bounds = (message as NSString).boundingRect(
+            let bounds = (displayedMessage as NSString).boundingRect(
                 with: NSSize(width: width, height: .greatestFiniteMagnitude),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 attributes: [.font: text.font!]
@@ -55,8 +60,8 @@ final class Overlay {
                                   width: width,
                                   height: height),
                            display: true)
-            let lines = message.split(separator: "\n", omittingEmptySubsequences: false).count
-            AppLog.write("OVERLAY show characters=\(message.count) lines=\(lines) frame=\(panel.frame)")
+            let lines = displayedMessage.split(separator: "\n", omittingEmptySubsequences: false).count
+            AppLog.write("OVERLAY show characters=\(displayedMessage.count) lines=\(lines) frame=\(panel.frame)")
         }
         panel.orderFrontRegardless()
 

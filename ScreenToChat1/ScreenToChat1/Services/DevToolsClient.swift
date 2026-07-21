@@ -45,7 +45,8 @@ final class DevToolsClient {
     }
 
     static func waitUntilAvailable() async throws {
-        for _ in 0..<8 {
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
             if await isAvailable() { return }
             try await Task.sleep(nanoseconds: 250_000_000)
         }
